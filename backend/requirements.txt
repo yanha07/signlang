@@ -1,0 +1,13 @@
+flask
+flask-cors
+tensorflow
+opencv-python-headless
+mediapipe
+numpy
+
+# --- PROJECT LINKS & SHORTCUTS ---
+# Frontend (React): http://localhost:5173
+# Start Frontend: cd frontend && npm run dev
+# 
+# Backend (Python): http://127.0.0.1:5000/predict
+# Start Backend: cd backend && python app.py

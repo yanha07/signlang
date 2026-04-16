@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+
+# Node (frontend)
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+
+# IDEs and OS
+.vscode/
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Environment variables
+.env
+
+# Project specific (ML models, large files)
+backend/models/
+backend/*.h5
+backend/*.pt
+backend/*.pkl
