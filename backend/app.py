@@ -37,6 +37,7 @@ def predict():
             return jsonify({'error': 'Sequence must be exactly 30 frames'}), 400
 
         prediction_text = ""
+        probability = 0.0
         if model is not None:
             # Inference expects (1, 30, 1662)
             input_data = np.expand_dims(input_sequence, axis=0)

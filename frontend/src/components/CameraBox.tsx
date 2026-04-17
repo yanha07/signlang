@@ -132,6 +132,9 @@ export default function CameraBox({ onPrediction }: CameraProps) {
     canvasCtx.save();
     canvasCtx.clearRect(0, 0, canvasEl.width, canvasEl.height);
     
+    // --- VISUAL FOCUS (Hands Only) ---
+    // We intentionally ignore drawing the Face and Pose to keep the webcam UI perfectly clean.
+    /*
     // Draw Face
     if (results.faceLandmarks) {
       window.drawConnectors(canvasCtx, results.faceLandmarks, window.FACEMESH_TESSELATION, {color: '#C0C0C070', lineWidth: 1});
@@ -141,6 +144,7 @@ export default function CameraBox({ onPrediction }: CameraProps) {
       window.drawConnectors(canvasCtx, results.poseLandmarks, window.POSE_CONNECTIONS, {color: 'white', lineWidth: 2});
       window.drawLandmarks(canvasCtx, results.poseLandmarks, {color: 'red', lineWidth: 1});
     }
+    */
     // Draw Left Hand
     if (results.leftHandLandmarks) {
       window.drawConnectors(canvasCtx, results.leftHandLandmarks, window.HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
@@ -206,15 +210,22 @@ export default function CameraBox({ onPrediction }: CameraProps) {
   };
 
   const extractKeypoints = (results: any) => {
+    // --- MATHEMATICAL FOCUS (Hands Only) ---
+    // We force Face and Pose to be solid zeros. This blinds the AI so it doesn't 
+    // get confused by your face shape or shoulder placement.
     let pose = new Array(132).fill(0);
+    /* 
     if (results.poseLandmarks) {
       pose = results.poseLandmarks.map((res: any) => [res.x || 0, res.y || 0, res.z || 0, res.visibility || 0]).flat();
     }
+    */
     
     let face = new Array(1404).fill(0);
+    /*
     if (results.faceLandmarks) {
       face = results.faceLandmarks.slice(0, 468).map((res: any) => [res.x || 0, res.y || 0, res.z || 0]).flat();
     }
+    */
     
     let lh = new Array(63).fill(0);
     if (results.leftHandLandmarks) {
