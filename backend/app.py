@@ -1,59 +1,143 @@
+import base64
+import json
+import os
+from io import BytesIO
+
 import flask
 from flask import request, jsonify
 from flask_cors import CORS
-import tensorflow as tf
-import numpy as np
+from PIL import Image
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
+
 
 app = flask.Flask(__name__)
 CORS(app, resources={r"/predict": {"origins": "*"}})
 
-try:
-    model = tf.keras.models.load_model('model.h5', compile=False)
-    print("Model loaded successfully.")
-except Exception as e:
-    print(f"Error loading model: {e}")
-    model = None
+# --- Local PyTorch model (the one you asked to use) ---
+#MODEL_PATH = os.environ.get("SIGN_PTH_PATH", "backend/backend/models/best_model.pth")
+#CLASS_MAPPING_PATH = os.environ.get("SIGN_CLASS_MAPPING", "backend/models/class_mapping.json")
 
-# Map index to sign label natively matching the loaded ASL model
-labels_map = [
-    '_', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'bad', 'bye', 
-    'C', 'D', 'E', 'F', 'G', 'good', 'H', 'hello', 'help', 'hungry', 'I', 'J', 'K', 
-    'L', 'love', 'M', 'N', 'no', 'O', 'P', 'please', 'Q', 'R', 'ready', 'S', 'sorry', 
-    'stop', 'T', 'thank_you', 'U', 'V', 'W', 'X', 'Y', 'yes', 'Z'
-]
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-@app.route('/predict', methods=['POST'])
+MODEL_PATH = os.path.join(BASE_DIR, "models", "best_model.pth")
+
+CLASS_MAPPING_PATH = os.path.join(
+    BASE_DIR,
+    "models",
+    "class_mapping.json"
+)
+
+
+_model = None
+_idx_to_class = None
+_device = torch.device("cpu")
+
+
+class SignResNet18(nn.Module):
+    """
+    Matches checkpoint keys like:
+      model.conv1.weight, ..., model.fc.1.weight, model.fc.4.weight
+    """
+
+    def __init__(self, num_classes: int = 26):
+        super().__init__()
+        self.model = models.resnet18(weights=None)
+        self.model.fc = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(512, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(512, num_classes),
+        )
+
+    def forward(self, x):
+        return self.model(x)
+
+
+_preprocess = transforms.Compose(
+    [
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
+
+
+def _load_class_mapping():
+    global _idx_to_class
+    if _idx_to_class is not None:
+        return _idx_to_class
+    with open(CLASS_MAPPING_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    idx_to_class_raw = data.get("idx_to_class", {})
+    _idx_to_class = {int(k): v for k, v in idx_to_class_raw.items()}
+    return _idx_to_class
+
+
+def _load_model():
+    global _model
+    if _model is not None:
+        return _model
+
+    ckpt = torch.load(MODEL_PATH, map_location=_device)
+    state_dict = ckpt.get("model_state_dict", ckpt)
+
+    m = SignResNet18(num_classes=26).to(_device)
+    m.load_state_dict(state_dict, strict=True)
+    m.eval()
+    _model = m
+    return _model
+
+
+def _decode_data_url_image(data_url: str):
+    if not isinstance(data_url, str) or "base64," not in data_url:
+        return None
+    try:
+        b64 = data_url.split("base64,", 1)[1]
+        raw = base64.b64decode(b64)
+        return Image.open(BytesIO(raw)).convert("RGB")
+    except Exception:
+        return None
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    try:
+        _load_class_mapping()
+        _load_model()
+        return jsonify({"ok": True, "model_path": MODEL_PATH, "classes": 26})
+    except Exception as e:
+        return jsonify({"ok": False, "model_path": MODEL_PATH, "error": str(e)}), 500
+
+
+@app.route("/predict", methods=["POST"])
 def predict():
     data = request.json
-    
-    if not data or 'sequence' not in data:
-        return jsonify({'error': 'No sequence data provided'}), 400
+    if not data or "image" not in data:
+        return jsonify({"error": 'Expected JSON body with key "image"'}), 400
+
+    img = _decode_data_url_image(data.get("image"))
+    if img is None:
+        return jsonify({"error": "Invalid image payload"}), 400
 
     try:
-        # sequence is a list of 30 frames, each frame is a list of 1662 keypoints
-        input_sequence = data['sequence']
-        
-        if len(input_sequence) != 30:
-            return jsonify({'error': 'Sequence must be exactly 30 frames'}), 400
+        idx_to_class = _load_class_mapping()
+        model = _load_model()
 
-        prediction_text = ""
-        probability = 0.0
-        if model is not None:
-            # Inference expects (1, 30, 1662)
-            input_data = np.expand_dims(input_sequence, axis=0)
-            res = model.predict(input_data, verbose=0)[0]
-            
-            # Ignore the '_' class unconditionally so it always guesses a physical sign
-            res[0] = 0.0
-            idx = np.argmax(res)
-            prediction_text = labels_map[idx] if idx < len(labels_map) else ""
-            probability = float(res[idx] * 100) # Convert to percentage
-            
-        return jsonify({'prediction': prediction_text, 'probability': probability})
+        x = _preprocess(img).unsqueeze(0).to(_device)
+        with torch.no_grad():
+            logits = model(x)
+            probs = torch.softmax(logits, dim=1)[0]
+            idx = int(torch.argmax(probs).item())
+            score = float(probs[idx].item())
 
+        pred = str(idx_to_class.get(idx, "")).strip()
+        return jsonify({"prediction": pred, "probability": score * 100.0})
     except Exception as e:
-        print(f"Error during prediction: {e}")
-        return jsonify({'error': 'Prediction failed'}), 500
+        return jsonify({"error": "Prediction failed", "detail": str(e)}), 500
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     app.run(port=5000, debug=True)

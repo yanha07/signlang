@@ -1,9 +1,9 @@
 flask
 flask-cors
-tensorflow
-opencv-python-headless
-mediapipe
-numpy
+torch
+pillow
+huggingface-hub
+torchvision
 
 # --- PROJECT LINKS & SHORTCUTS ---
 # Frontend (React): http://localhost:5173

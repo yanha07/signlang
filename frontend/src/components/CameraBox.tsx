@@ -14,7 +14,7 @@ declare global {
 }
 
 interface CameraProps {
-  onPrediction: (text: string) => void;
+  onPrediction: (text: string, probability?: number) => void;
 }
 
 export default function CameraBox({ onPrediction }: CameraProps) {
@@ -24,15 +24,80 @@ export default function CameraBox({ onPrediction }: CameraProps) {
   const [isRecording, setIsRecording] = useState(false);
   
   const lastPredictionRef = useRef({ text: "", prob: 0, timeout: null as any });
+  const recentPredictionsRef = useRef<string[]>([]);
   const sequenceRef = useRef<number[][]>([]);
   const isRecordingRef = useRef(false);
   const frameCountRef = useRef(0);
+
+  const formatPredictionText = (label: string) => {
+    return label
+      .replace(/_/g, " ")
+      .trim()
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+  };
+
+  const getHandBoundingBox = (results: any) => {
+    const points = [
+      ...(results.leftHandLandmarks || []),
+      ...(results.rightHandLandmarks || []),
+    ];
+
+    if (points.length === 0) return null;
+
+    let minX = 1;
+    let minY = 1;
+    let maxX = 0;
+    let maxY = 0;
+
+    points.forEach((lm: any) => {
+      minX = Math.min(minX, lm.x);
+      minY = Math.min(minY, lm.y);
+      maxX = Math.max(maxX, lm.x);
+      maxY = Math.max(maxY, lm.y);
+    });
+
+    const padding = 0.08;
+    return {
+      xMin: Math.max(0, minX - padding),
+      yMin: Math.max(0, minY - padding),
+      xMax: Math.min(1, maxX + padding),
+      yMax: Math.min(1, maxY + padding),
+    };
+  };
+
+  const getCroppedHandImage = (bbox: { xMin: number; yMin: number; xMax: number; yMax: number } | null) => {
+    const video = webcamRef.current?.video as HTMLVideoElement | undefined;
+    if (!video || !bbox) return null;
+    if (video.videoWidth === 0 || video.videoHeight === 0) return null;
+
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+
+    const sx = Math.max(0, Math.floor(bbox.xMin * vw));
+    const sy = Math.max(0, Math.floor(bbox.yMin * vh));
+    const ex = Math.min(vw, Math.ceil(bbox.xMax * vw));
+    const ey = Math.min(vh, Math.ceil(bbox.yMax * vh));
+
+    const sw = Math.max(1, ex - sx);
+    const sh = Math.max(1, ey - sy);
+
+    const outSize = 224;
+    const canvas = document.createElement('canvas');
+    canvas.width = outSize;
+    canvas.height = outSize;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, outSize, outSize);
+    return canvas.toDataURL('image/jpeg', 0.75);
+  };
 
   useEffect(() => {
     isRecordingRef.current = isRecording;
     if (!isRecording) {
       sequenceRef.current = [];
       frameCountRef.current = 0;
+      recentPredictionsRef.current = [];
     }
   }, [isRecording]);
 
@@ -63,28 +128,44 @@ export default function CameraBox({ onPrediction }: CameraProps) {
       if (!isRecordingRef.current) return;
       
       const keypoints = extractKeypoints(results);
+      sequenceRef.current.push(keypoints);
+      if (sequenceRef.current.length > 60) {
+        sequenceRef.current.shift();
+      }
       
       frameCountRef.current++;
       
-      // Increased time: We now only predict once every 3-4 seconds (every 100 frames).
-      // This gives you plenty of time to position your hand before the picture is snapped!
-      if (frameCountRef.current % 100 === 0) {
-        // HACK: The Kaggle dataset used was static images copied 30 times.
-        // We will duplicate this exact single frame 30 times to perfectly mimic the training data!
-        const frozenSequence = new Array(30).fill(keypoints);
-        
+      // Predict at a controlled interval (static alphabet model).
+      if (frameCountRef.current % 10 === 0) {
+        const bbox = getHandBoundingBox(results);
+        if (!bbox) return; // no hand detected -> no request
+        const croppedImage = getCroppedHandImage(bbox);
+        if (!croppedImage) return;
+
         fetch('http://127.0.0.1:5000/predict', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sequence: frozenSequence }),
+          body: JSON.stringify({ image: croppedImage }),
         })
         .then(res => res.json())
         .then(data => {
             if (data.prediction && data.prediction.trim() !== '') {
-                onPrediction(data.prediction);
+                const formattedPrediction = formatPredictionText(data.prediction);
+                recentPredictionsRef.current.push(formattedPrediction);
+                if (recentPredictionsRef.current.length > 5) {
+                    recentPredictionsRef.current.shift();
+                }
+
+                // Stability vote: require the latest prediction to appear repeatedly.
+                const latestCount = recentPredictionsRef.current.filter(
+                  (item) => item === formattedPrediction
+                ).length;
+                if (latestCount < 2) return;
+
+                onPrediction(formattedPrediction, data.probability);
                 
                 // Store the prediction to draw the OpenCV-style green box
-                lastPredictionRef.current.text = data.prediction;
+                lastPredictionRef.current.text = formattedPrediction;
                 lastPredictionRef.current.prob = data.probability;
                 
                 if (lastPredictionRef.current.timeout) {
@@ -189,7 +270,7 @@ export default function CameraBox({ onPrediction }: CameraProps) {
             canvasCtx.strokeStyle = '#00FF00';
             canvasCtx.stroke();
             
-            // 2. Format the Text ('Hello: 99.0%')
+            // 2. Format user-facing text without exposing model route details.
             const textStr = `${lastPredictionRef.current.text}: ${lastPredictionRef.current.prob.toFixed(1)}%`;
             canvasCtx.font = 'bold 24px Arial';
             const textWidth = canvasCtx.measureText(textStr).width;
@@ -242,7 +323,7 @@ export default function CameraBox({ onPrediction }: CameraProps) {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="relative w-full h-[500px] bg-black rounded-2xl overflow-hidden border-4 border-white shadow-xl flex items-center justify-center">
+      <div className="relative w-full h-[520px] bg-black rounded-3xl overflow-hidden border border-white/60 shadow-2xl flex items-center justify-center">
         <Webcam
           audio={false}
           ref={webcamRef}
@@ -258,14 +339,16 @@ export default function CameraBox({ onPrediction }: CameraProps) {
           className="absolute w-full h-full object-cover z-0 pointer-events-none"
         />
 
-        <div className="absolute bottom-4 left-4 bg-red-600 text-white text-xs px-2 py-1 rounded font-bold uppercase tracking-tighter shadow-md z-10 animate-pulse">
-          Live Feed
+        <div className="absolute bottom-4 left-4 z-10">
+          <span className="inline-flex items-center gap-2 bg-black/60 text-white text-xs px-3 py-1.5 rounded-full font-semibold shadow-md border border-white/10">
+            <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
+            Live
+          </span>
         </div>
 
         {isRecording && (
-          <div className="absolute top-4 right-4 bg-black/70 text-white text-sm px-4 py-2 rounded-full font-bold shadow-md z-10 text-center border border-white/20">
-            <span className="w-2 h-2 rounded-full inline-block bg-red-500 animate-ping mr-2"></span>
-            Detecting Signs...
+          <div className="absolute top-4 right-4 bg-black/60 text-white text-sm px-4 py-2 rounded-full font-semibold shadow-md z-10 text-center border border-white/10 backdrop-blur">
+            Translating...
           </div>
         )}
       </div>
@@ -274,14 +357,14 @@ export default function CameraBox({ onPrediction }: CameraProps) {
         {!isRecording ? (
           <button 
             onClick={() => setIsRecording(true)}
-            className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-full shadow-lg transition-all transform hover:scale-105"
+            className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold py-3 px-10 rounded-full shadow-lg transition-all transform hover:scale-[1.02] active:scale-[0.99] focus:outline-none focus:ring-4 focus:ring-blue-200"
           >
-             Start
+            Start
           </button>
         ) : (
           <button 
             onClick={() => setIsRecording(false)}
-            className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-8 rounded-full shadow-lg transition-all transform hover:scale-105"
+            className="bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-700 hover:to-red-700 text-white font-bold py-3 px-10 rounded-full shadow-lg transition-all transform hover:scale-[1.02] active:scale-[0.99] focus:outline-none focus:ring-4 focus:ring-rose-200"
           >
             Stop
           </button>
